@@ -13,12 +13,16 @@
             <div class="logo">🐾 PawPal <small style="font-size: 0.6em; color: #999;">(Sprint 2 - Composite Integration)</small></div>
             <div class="nav-links">
                 <a href="#" onclick="showPage('home')">Home</a>
-                <a href="#" onclick="showPage('services')">Services</a>
-                <a href="#" onclick="showPage('profile')">My Profile</a>
-                <a href="#" onclick="showPage('bookings')">Bookings</a>
+                <a href="#" onclick="showPage('services')" class="nav-auth-required" style="display: none;">Services</a>
+                <a href="#" onclick="showPage('profile')" class="nav-auth-required" style="display: none;">My Profile</a>
+                <a href="#" onclick="showPage('bookings')" class="nav-auth-required" style="display: none;">Bookings</a>
                 <a href="#" onclick="showPage('demo')" style="color: #ff6b6b;">Sprint 2 Demo</a>
-                <button class="btn btn-outline" onclick="showPage('login')">Login</button>
-                <button class="btn" onclick="showPage('signup')">Sign Up</button>
+                <button class="btn btn-outline nav-guest-only" onclick="showPage('login')">Login</button>
+                <button class="btn nav-guest-only" onclick="showPage('signup')">Sign Up</button>
+                <div class="nav-auth-required" style="display: none; align-items: center; gap: 10px;">
+                    <span id="navUserName" style="color: #333; font-weight: 500;"></span>
+                    <button class="btn btn-outline" onclick="logout()">Logout</button>
+                </div>
             </div>
         </div>
     </nav>
@@ -166,13 +170,17 @@
                 <h2>Login to Your Account</h2>
                 <form id="loginForm">
                     <div class="form-group">
-                        <label>Email</label>
-                        <input type="email" id="loginEmail" placeholder="Enter your email" required>
+                        <label>Name <span style="color: red;">*</span></label>
+                        <input type="text" id="loginName" placeholder="Enter your name" required>
+                        <small style="color: #666;">Use the name from your registration</small>
                     </div>
                     <div class="form-group">
-                        <label>Password</label>
-                        <input type="password" id="loginPassword" placeholder="Enter your password" required>
+                        <label>Email <span style="color: red;">*</span></label>
+                        <input type="email" id="loginEmail" placeholder="Enter your email" required>
                     </div>
+                    <p style="color: #666; margin: 15px 0; font-size: 0.9em; background: #f5f5f5; padding: 10px; border-radius: 5px;">
+                        ℹ️ Note: Password authentication is disabled. Login with your name and email only.
+                    </p>
                     <button type="submit" class="btn" style="width: 100%;">Login</button>
                 </form>
                 <p style="text-align: center; margin-top: 1rem;">
@@ -188,36 +196,65 @@
             <div class="form-container">
                 <h2>Create Your Account</h2>
                 <form id="signupForm">
-                    <div class="form-group">
-                        <label>Account Type</label>
-                        <div class="radio-group">
-                            <div class="radio-option selected" onclick="selectAccountType(this, 'owner')">
-                                <div>🏠</div>
-                                <div>Pet Owner</div>
-                            </div>
-                            <div class="radio-option" onclick="selectAccountType(this, 'walker')">
-                                <div>🚶</div>
-                                <div>Pet Walker</div>
+                    <div style="background: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                        <h3 style="margin-top: 0; color: #333;">Account Information</h3>
+                        
+                        <div class="form-group">
+                            <label>Name <span style="color: red;">*</span></label>
+                            <input type="text" id="signupName" placeholder="Enter your full name" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Email <span style="color: red;">*</span></label>
+                            <input type="email" id="signupEmail" placeholder="your@email.com" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Account Type <span style="color: red;">*</span></label>
+                            <div class="radio-group">
+                                <div class="radio-option selected" onclick="selectAccountType(this, 'owner')">
+                                    <div>🏠</div>
+                                    <div>Pet Owner</div>
+                                </div>
+                                <div class="radio-option" onclick="selectAccountType(this, 'walker')">
+                                    <div>🚶</div>
+                                    <div>Pet Walker</div>
+                                </div>
                             </div>
                         </div>
+                        
+                        <div class="form-group">
+                            <label>Phone <span style="color: red;">*</span></label>
+                            <input type="tel" id="signupPhone" placeholder="15551234567" pattern="^\+?[1-9]\d{0,15}$" required>
+                            <small style="color: #666; display: block; margin-top: 5px;">
+                                ⚠️ Format: Digits only, no dashes or spaces<br>
+                                ✅ Valid: 15551234567, +8613812345678<br>
+                                ❌ Invalid: 555-0100, (555) 123-4567
+                            </small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Location <span style="color: red;">*</span></label>
+                            <input type="text" id="signupLocation" placeholder="City, State" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Profile Image URL <span style="color: red;">*</span></label>
+                            <input type="url" id="signupProfileImage" placeholder="https://example.com/your-photo.jpg" required>
+                            <small style="color: #666;">Direct link to your profile photo</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Bio <span style="color: red;">*</span></label>
+                            <textarea id="signupBio" rows="3" placeholder="Tell us about yourself and your experience with pets..." style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px;" required></textarea>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label>Full Name</label>
-                        <input type="text" id="signupName" placeholder="Enter your name" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Email</label>
-                        <input type="email" id="signupEmail" placeholder="Enter your email" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Password</label>
-                        <input type="password" id="signupPassword" placeholder="Create a password" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Location</label>
-                        <input type="text" id="signupLocation" placeholder="City, State" required>
-                    </div>
-                    <button type="submit" class="btn" style="width: 100%;">Create Account</button>
+                    
+                    <p style="color: #666; margin: 15px 0; font-size: 0.9em; background: #f5f5f5; padding: 10px; border-radius: 5px;">
+                        ℹ️ Note: All fields are required. You'll login with your name and email after registration.
+                    </p>
+                    
+                    <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">Create Account</button>
                 </form>
             </div>
         </div>

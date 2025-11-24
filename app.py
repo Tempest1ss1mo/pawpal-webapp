@@ -15,319 +15,869 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['DEBUG'] = os.environ.get('FLASK_DEBUG', 'True') == 'True'
 
-# Enable CORS for microservice communication
-CORS(app)
+# Enable CORS
+CORS(app, supports_credentials=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Microservice URLs - Updated for Sprint 2
-USER_SERVICE_URL = os.environ.get('USER_SERVICE_URL', 'http://localhost:3001')
+# Microservice URLs - PRODUCTION (VM Deployment)
+USER_SERVICE_URL = os.environ.get('USER_SERVICE_URL', 'http://34.9.57.25:3001')
 COMPOSITE_SERVICE_URL = os.environ.get('COMPOSITE_SERVICE_URL', 'http://localhost:3002')
 
-# Legacy URLs for compatibility
-WALKING_SERVICE_URL = os.environ.get('WALKING_SERVICE_URL', 'http://localhost:5002')
-REVIEW_SERVICE_URL = os.environ.get('REVIEW_SERVICE_URL', 'http://localhost:5003')
+logger.info(f"Using PRODUCTION User Service at: {USER_SERVICE_URL}")
+logger.info(f"Swagger UI available at: {USER_SERVICE_URL}/api-docs")
 
 # Routes
 @app.route('/')
 def index():
     """Main application page"""
-    logger.info('Serving index page')
     return render_template('index.html')
 
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
-    # Check composite service health
-    composite_status = 'unknown'
-    try:
-        response = requests.get(f'{COMPOSITE_SERVICE_URL}/health', timeout=2)
-        if response.status_code == 200:
-            composite_status = 'healthy'
-    except:
-        composite_status = 'unavailable'
-    
-    return jsonify({
+    health_status = {
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'service': 'pawpal-web-app',
-        'dependencies': {
-            'composite_service': composite_status
-        }
-    })
-
-# User Management Routes (via Composite Service)
-@app.route('/api/login', methods=['POST'])
-def login():
-    """Handle user login - connects to User Service via Composite"""
-    data = request.json
-    logger.info(f"Login attempt for user: {data.get('email')}")
+        'environment': 'production',
+        'dependencies': {}
+    }
     
     try:
-        # In real implementation, this would authenticate via User Service
-        # For now, we'll validate against User Service
-        response = requests.get(f'{USER_SERVICE_URL}/api/users', 
-                               params={'email': data.get('email')})
+        response = requests.get(f'{USER_SERVICE_URL}/health', timeout=5)
+        health_status['dependencies']['user_service'] = {
+            'status': 'healthy' if response.status_code == 200 else 'unhealthy',
+            'url': USER_SERVICE_URL,
+            'deployment': 'GCP VM'
+        }
+    except Exception as e:
+        health_status['dependencies']['user_service'] = {
+            'status': 'unavailable',
+            'url': USER_SERVICE_URL,
+            'error': str(e)
+        }
+    
+    try:
+        response = requests.get(f'{COMPOSITE_SERVICE_URL}/health', timeout=2)
+        health_status['dependencies']['composite_service'] = {
+            'status': 'healthy' if response.status_code == 200 else 'unhealthy',
+            'url': COMPOSITE_SERVICE_URL,
+            'deployment': 'local'
+        }
+    except:
+        health_status['dependencies']['composite_service'] = {
+            'status': 'unavailable',
+            'url': COMPOSITE_SERVICE_URL,
+            'deployment': 'local'
+        }
+    
+    return jsonify(health_status)
+
+# ==================== USER AUTHENTICATION ====================
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """Handle user login using name and email"""
+    data = request.json
+    name = data.get('name', '').strip()
+    email = data.get('email', '').strip().lower()
+    
+    if not name:
+        return jsonify({
+            'success': False,
+            'message': 'Name is required'
+        }), 400
+    
+    if not email:
+        return jsonify({
+            'success': False,
+            'message': 'Email is required'
+        }), 400
+    
+    logger.info(f"Login attempt - Name: {name}, Email: {email}")
+    
+    try:
+        # Search for user by email and verify name matches
+        response = requests.get(
+            f'{USER_SERVICE_URL}/api/users/search',
+            params={'q': email},
+            timeout=10
+        )
         
         if response.status_code == 200:
-            users = response.json().get('data', [])
-            if users and len(users) > 0:
-                session['user'] = users[0]
+            result = response.json()
+            users = result.get('data', [])
+            
+            # Find user with matching email AND name
+            user = None
+            for u in users:
+                if (u.get('email', '').lower() == email and 
+                    u.get('name', '').lower() == name.lower()):
+                    user = u
+                    break
+            
+            if user:
+                # Login successful
+                session['user_id'] = user['id']
+                session['user_email'] = user['email']
+                session['user_name'] = user['name']
+                session['user_role'] = user['role']
+                
+                logger.info(f"Login successful for user ID: {user['id']}")
+                
                 return jsonify({
-                    'status': 'success',
+                    'success': True,
                     'message': 'Login successful',
-                    'user': users[0]
+                    'user': {
+                        'id': user['id'],
+                        'name': user['name'],
+                        'email': user['email'],
+                        'role': user['role']
+                    }
                 })
-        
-        return jsonify({
-            'status': 'error',
-            'message': 'Invalid credentials'
-        }), 401
-        
-    except Exception as e:
+            else:
+                # Check if email exists but name doesn't match
+                email_exists = any(u.get('email', '').lower() == email for u in users)
+                if email_exists:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Name does not match the email. Please check your credentials.'
+                    }), 401
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'User not found. Please check your email or sign up first.'
+                    }), 404
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Service error'
+            }), 500
+            
+    except requests.exceptions.RequestException as e:
         logger.error(f"Login error: {str(e)}")
         return jsonify({
-            'status': 'error',
-            'message': 'Login service unavailable'
+            'success': False,
+            'message': f'User service error: {str(e)}'
         }), 503
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
-    """Handle user registration - connects to User Service"""
+    """Handle user registration with all required fields"""
     data = request.json
-    logger.info(f"Signup attempt - Type: {data.get('accountType')}")
+    
+    # Extract all fields
+    email = data.get('email', '').strip().lower()
+    name = data.get('name', '').strip()
+    role = data.get('accountType', 'owner')  # Frontend sends 'accountType'
+    phone = data.get('phone', '').strip()
+    location = data.get('location', '').strip()
+    profile_image_url = data.get('profile_image_url', '').strip()
+    bio = data.get('bio', '').strip()
+    
+    logger.info(f"Signup attempt - Name: {name}, Email: {email}, Role: {role}")
+    
+    # Validate ALL required fields
+    if not name:
+        return jsonify({
+            'success': False,
+            'message': 'Name is required'
+        }), 400
+    
+    if not email:
+        return jsonify({
+            'success': False,
+            'message': 'Email is required'
+        }), 400
+    
+    if not phone:
+        return jsonify({
+            'success': False,
+            'message': 'Phone is required'
+        }), 400
+    
+    if not location:
+        return jsonify({
+            'success': False,
+            'message': 'Location is required'
+        }), 400
+    
+    if not profile_image_url:
+        return jsonify({
+            'success': False,
+            'message': 'Profile image URL is required'
+        }), 400
+    
+    if not bio:
+        return jsonify({
+            'success': False,
+            'message': 'Bio is required'
+        }), 400
+    
+    # Simple email validation
+    if '@' not in email or '.' not in email:
+        return jsonify({
+            'success': False,
+            'message': 'Invalid email format'
+        }), 400
+    
+    # Validate role
+    if role not in ['owner', 'walker']:
+        return jsonify({
+            'success': False,
+            'message': 'Invalid role. Must be "owner" or "walker"'
+        }), 400
+    
+    # Validate phone format
+    import re
+    phone_pattern = r'^\+?[1-9]\d{0,15}$'
+    if not re.match(phone_pattern, phone):
+        return jsonify({
+            'success': False,
+            'message': 'Invalid phone format. Use digits only (e.g., 15551234567) or with + prefix (e.g., +8613812345678). No dashes or spaces allowed.'
+        }), 400
     
     try:
-        # Create user via User Service
+        # Check if user already exists
+        search_response = requests.get(
+            f'{USER_SERVICE_URL}/api/users/search',
+            params={'q': email},
+            timeout=10
+        )
+        
+        if search_response.status_code == 200:
+            search_result = search_response.json()
+            existing_users = search_result.get('data', [])
+            
+            # Check for exact email match
+            for existing_user in existing_users:
+                if existing_user.get('email', '').lower() == email:
+                    logger.info(f"User already exists: {email}")
+                    return jsonify({
+                        'success': False,
+                        'message': 'Email already exists. Please login instead or use a different email.'
+                    }), 409
+        
+        # Prepare user data for VM User Service with ALL fields
         user_data = {
-            'name': data.get('name'),
-            'email': data.get('email'),
-            'role': data.get('accountType', 'owner'),
-            'phone': data.get('phone'),
-            'location': data.get('location')
+            'name': name,
+            'email': email,
+            'role': role,
+            'phone': phone,
+            'location': location,
+            'profile_image_url': profile_image_url,
+            'bio': bio
         }
         
-        response = requests.post(f'{USER_SERVICE_URL}/api/users', json=user_data)
+        logger.info(f"Creating user with data: {json.dumps(user_data, indent=2)}")
         
-        if response.status_code in [200, 201]:
+        # Create user on VM service
+        response = requests.post(
+            f'{USER_SERVICE_URL}/api/users',
+            json=user_data,
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        
+        logger.info(f"VM Service Response Status: {response.status_code}")
+        
+        if response.status_code == 201:
+            # Success - 201 Created
+            result = response.json()
+            created_user = result.get('data', {})
+            
+            logger.info(f"User created successfully with ID: {created_user.get('id')}")
+            
+            # Auto-login after signup
+            session['user_id'] = created_user.get('id')
+            session['user_email'] = created_user.get('email', email)
+            session['user_name'] = created_user.get('name', name)
+            session['user_role'] = created_user.get('role', role)
+            
             return jsonify({
-                'status': 'success',
+                'success': True,
                 'message': 'Account created successfully',
-                'data': response.json()
-            })
-        else:
+                'user': {
+                    'id': created_user.get('id'),
+                    'name': created_user.get('name', name),
+                    'email': created_user.get('email', email),
+                    'role': created_user.get('role', role)
+                }
+            }), 201  # Return 201 to match VM service
+            
+        elif response.status_code == 200:
+            # Some services might return 200 instead of 201
+            result = response.json()
+            if result.get('success'):
+                created_user = result.get('data', {})
+                logger.info(f"User created successfully (200 response)")
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Account created successfully',
+                    'user': created_user
+                }), 200
+            else:
+                # 200 but not successful
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to create account'
+                }), 400
+                
+        elif response.status_code == 409:
             return jsonify({
-                'status': 'error',
-                'message': response.json().get('message', 'Failed to create account')
+                'success': False,
+                'message': 'Email already exists. Please use a different email.'
+            }), 409
+        elif response.status_code == 400:
+            error_data = response.json()
+            # Extract validation error details if available
+            details = error_data.get('details', [])
+            if details:
+                error_messages = []
+                for detail in details:
+                    field = detail.get('field', 'unknown')
+                    msg = detail.get('message', 'validation error')
+                    error_messages.append(f"{field}: {msg}")
+                return jsonify({
+                    'success': False,
+                    'message': 'Validation errors:\n' + '\n'.join(error_messages)
+                }), 400
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': error_data.get('message', 'Invalid input data')
+                }), 400
+        else:
+            # Any other status code is an error
+            logger.error(f"Unexpected status code: {response.status_code}")
+            logger.error(f"Response: {response.text}")
+            return jsonify({
+                'success': False,
+                'message': f'Failed to create account. Server returned status {response.status_code}'
             }), response.status_code
             
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Signup error: {str(e)}")
         return jsonify({
-            'status': 'error',
-            'message': 'Signup service unavailable'
+            'success': False,
+            'message': f'Service error: {str(e)}'
         }), 503
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    """Handle user logout"""
+    session.clear()
+    return jsonify({
+        'success': True,
+        'message': 'Logged out successfully'
+    })
+
+@app.route('/api/current-user', methods=['GET'])
+def current_user():
+    """Get current logged in user"""
+    if 'user_id' in session:
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': session.get('user_id'),
+                'name': session.get('user_name'),
+                'email': session.get('user_email'),
+                'role': session.get('user_role')
+            }
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Not logged in'
+        }), 401
+
+# ==================== USER PROFILE ====================
+
+@app.route('/api/profile', methods=['GET', 'PUT', 'DELETE'])
+def profile():
+    """Get, update, or delete user profile using VM Service"""
+    if 'user_id' not in session:
+        return jsonify({
+            'success': False,
+            'message': 'Please login first'
+        }), 401
+    
+    if request.method == 'GET':
+        try:
+            # Get user from VM service
+            response = requests.get(
+                f'{USER_SERVICE_URL}/api/users/{session["user_id"]}',
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                user_data = result.get('data', {})
+                
+                # Get user's dogs
+                dogs_response = requests.get(
+                    f'{USER_SERVICE_URL}/api/dogs/owner/{session["user_id"]}',
+                    timeout=10
+                )
+                
+                dogs = []
+                if dogs_response.status_code == 200:
+                    dogs_result = dogs_response.json()
+                    dogs = dogs_result.get('data', [])
+                
+                # Get user stats
+                stats_response = requests.get(
+                    f'{USER_SERVICE_URL}/api/users/{session["user_id"]}/stats',
+                    timeout=10
+                )
+                
+                stats = {}
+                if stats_response.status_code == 200:
+                    stats_result = stats_response.json()
+                    stats = stats_result.get('data', {})
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'user': user_data,
+                        'dogs': dogs,
+                        'stats': stats
+                    }
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to get profile'
+                }), response.status_code
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Get profile error: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'Service error: {str(e)}'
+            }), 503
+    
+    elif request.method == 'PUT':
+        data = request.json
+        try:
+            # Only send fields that are being updated
+            update_data = {}
+            if 'name' in data:
+                update_data['name'] = data['name']
+            if 'phone' in data:
+                update_data['phone'] = data['phone']
+            if 'location' in data:
+                update_data['location'] = data['location']
+            if 'bio' in data:
+                update_data['bio'] = data['bio']
+            
+            response = requests.put(
+                f'{USER_SERVICE_URL}/api/users/{session["user_id"]}',
+                json=update_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                updated_user = result.get('data', {})
+                
+                # Update session
+                if 'name' in updated_user:
+                    session['user_name'] = updated_user['name']
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Profile updated successfully',
+                    'user': updated_user
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to update profile'
+                }), response.status_code
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Update profile error: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'Service error: {str(e)}'
+            }), 503
+    
+    else:  # DELETE
+        try:
+            # Soft delete user
+            response = requests.delete(
+                f'{USER_SERVICE_URL}/api/users/{session["user_id"]}',
+                timeout=10
+            )
+            
+            if response.status_code in [200, 204]:
+                session.clear()
+                return jsonify({
+                    'success': True,
+                    'message': 'Account deactivated successfully'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to delete account'
+                }), response.status_code
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Delete profile error: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'Service error: {str(e)}'
+            }), 503
+
+# ==================== PET MANAGEMENT ====================
 
 @app.route('/api/pets', methods=['GET', 'POST'])
 def pets():
-    """Handle pet management via Composite Service"""
+    """Handle pet management using VM User Service"""
     if request.method == 'POST':
+        if 'user_id' not in session:
+            return jsonify({
+                'success': False,
+                'message': 'Please login first'
+            }), 401
+        
         data = request.json
         logger.info(f"Adding new pet: {data.get('name')}")
         
         try:
-            # Use composite service for foreign key validation
-            pet_data = {
-                'owner_id': session.get('user', {}).get('id', 1),  # Default to 1 for demo
+            # Prepare dog data
+            dog_data = {
+                'owner_id': session['user_id'],
                 'name': data.get('name'),
-                'breed': data.get('breed'),
-                'age': int(data.get('ageYears', 0)),
+                'breed': data.get('breed', 'Mixed'),
+                'age': int(data.get('ageYears', 0)) if data.get('ageYears') else 0,
                 'size': data.get('size', 'medium'),
-                'temperament': data.get('temperament', ''),
-                'energy_level': 'medium',
+                'temperament': data.get('temperament', 'Friendly'),
+                'energy_level': data.get('energy_level', 'medium'),
                 'is_friendly_with_other_dogs': True,
                 'is_friendly_with_children': True
             }
             
-            # Create dog with foreign key validation via composite service
-            response = requests.post(f'{COMPOSITE_SERVICE_URL}/api/composite/dogs', 
-                                    json=pet_data)
+            if data.get('special_needs'):
+                dog_data['special_needs'] = data.get('special_needs')
+            
+            # Create dog on VM service
+            response = requests.post(
+                f'{USER_SERVICE_URL}/api/dogs',
+                json=dog_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
             
             if response.status_code in [200, 201]:
+                result = response.json()
                 return jsonify({
-                    'status': 'success',
+                    'success': True,
                     'message': 'Pet added successfully',
-                    'data': response.json()
+                    'data': result.get('data', result)
                 })
             else:
                 error_msg = response.json().get('message', 'Failed to add pet')
                 return jsonify({
-                    'status': 'error',
+                    'success': False,
                     'message': error_msg
                 }), response.status_code
                 
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             logger.error(f"Add pet error: {str(e)}")
             return jsonify({
-                'status': 'error',
-                'message': 'Failed to add pet'
+                'success': False,
+                'message': f'Service error: {str(e)}'
             }), 503
-    else:
-        # GET pets - use composite service for aggregated data
+    
+    else:  # GET
+        if 'user_id' not in session:
+            return jsonify({'pets': []})
+        
         try:
-            user_id = session.get('user', {}).get('id', 1)
-            response = requests.get(f'{COMPOSITE_SERVICE_URL}/api/composite/users/{user_id}/dogs')
+            # Get user's dogs from VM service
+            response = requests.get(
+                f'{USER_SERVICE_URL}/api/dogs/owner/{session["user_id"]}',
+                timeout=10
+            )
             
             if response.status_code == 200:
                 result = response.json()
-                pets_data = result.get('data', {}).get('dogs', [])
+                dogs = result.get('data', [])
                 
-                # Transform to match frontend expectations
                 pets_formatted = [{
-                    'id': pet.get('id'),
-                    'name': pet.get('name'),
+                    'id': dog.get('id'),
+                    'name': dog.get('name'),
                     'type': 'dog',
-                    'breed': pet.get('breed', 'Mixed breed')
-                } for pet in pets_data]
+                    'breed': dog.get('breed', 'Mixed breed'),
+                    'age': dog.get('age', 0),
+                    'size': dog.get('size', 'medium'),
+                    'temperament': dog.get('temperament', ''),
+                    'energy_level': dog.get('energy_level', 'medium')
+                } for dog in dogs]
                 
-                return jsonify({
-                    'pets': pets_formatted
-                })
+                return jsonify({'pets': pets_formatted})
             else:
                 return jsonify({'pets': []})
                 
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             logger.error(f"Get pets error: {str(e)}")
             return jsonify({'pets': []})
 
-# Walking service routes (placeholder for now)
+@app.route('/api/pets/<int:pet_id>', methods=['PUT', 'DELETE'])
+def manage_pet(pet_id):
+    """Update or delete a specific pet using VM Service"""
+    if 'user_id' not in session:
+        return jsonify({
+            'success': False,
+            'message': 'Please login first'
+        }), 401
+    
+    if request.method == 'PUT':
+        data = request.json
+        try:
+            response = requests.put(
+                f'{USER_SERVICE_URL}/api/dogs/{pet_id}',
+                json=data,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return jsonify({
+                    'success': True,
+                    'message': 'Pet updated successfully',
+                    'data': result.get('data', {})
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to update pet'
+                }), response.status_code
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Update pet error: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'Service error: {str(e)}'
+            }), 503
+    
+    else:  # DELETE
+        try:
+            response = requests.delete(
+                f'{USER_SERVICE_URL}/api/dogs/{pet_id}',
+                timeout=10
+            )
+            
+            if response.status_code in [200, 204]:
+                return jsonify({
+                    'success': True,
+                    'message': 'Pet deleted successfully'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to delete pet'
+                }), response.status_code
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Delete pet error: {str(e)}")
+            return jsonify({
+                'success': False,
+                'message': f'Service error: {str(e)}'
+            }), 503
+
+# ==================== STATISTICS ====================
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    """Get statistics from VM User Service"""
+    try:
+        stats = {
+            'totalUsers': 0,
+            'totalDogs': 0,
+            'owners': 0,
+            'walkers': 0,
+            'breeds': [],
+            'sizes': []
+        }
+        
+        # Get user count
+        users_response = requests.get(
+            f'{USER_SERVICE_URL}/api/users',
+            params={'limit': 1},
+            timeout=10
+        )
+        
+        if users_response.status_code == 200:
+            users_data = users_response.json()
+            stats['totalUsers'] = users_data.get('total', 0)
+        
+        # Get dog statistics
+        breed_stats_response = requests.get(
+            f'{USER_SERVICE_URL}/api/dogs/stats/breeds',
+            timeout=10
+        )
+        
+        if breed_stats_response.status_code == 200:
+            breed_data = breed_stats_response.json()
+            stats['breeds'] = breed_data.get('data', [])
+            stats['totalDogs'] = sum(b.get('count', 0) for b in stats['breeds'])
+        
+        size_stats_response = requests.get(
+            f'{USER_SERVICE_URL}/api/dogs/stats/sizes',
+            timeout=10
+        )
+        
+        if size_stats_response.status_code == 200:
+            size_data = size_stats_response.json()
+            stats['sizes'] = size_data.get('data', [])
+        
+        # Get owner and walker counts
+        owners_response = requests.get(
+            f'{USER_SERVICE_URL}/api/users/owners',
+            params={'limit': 1},
+            timeout=10
+        )
+        if owners_response.status_code == 200:
+            stats['owners'] = owners_response.json().get('total', 0)
+        
+        walkers_response = requests.get(
+            f'{USER_SERVICE_URL}/api/users/walkers',
+            params={'limit': 1},
+            timeout=10
+        )
+        if walkers_response.status_code == 200:
+            stats['walkers'] = walkers_response.json().get('total', 0)
+        
+        return jsonify({
+            'success': True,
+            'stats': stats
+        })
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Get stats error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Service error: {str(e)}'
+        }), 503
+
+# ==================== WALKER SEARCH ====================
+
 @app.route('/api/walkers', methods=['GET'])
 def get_walkers():
-    """Get available walkers - uses User Service"""
-    date = request.args.get('date')
-    time = request.args.get('time')
-    logger.info(f"Fetching walkers for {date} at {time}")
-    
+    """Get available walkers from VM User Service"""
     try:
-        # Get walkers from User Service
-        response = requests.get(f'{USER_SERVICE_URL}/api/users', 
-                               params={'role': 'walker'})
+        params = {
+            'role': 'walker',
+            'limit': 20
+        }
+        
+        location = request.args.get('location')
+        if location:
+            params['location'] = location
+        
+        min_rating = request.args.get('min_rating')
+        if min_rating:
+            params['min_rating'] = min_rating
+        
+        response = requests.get(
+            f'{USER_SERVICE_URL}/api/users',
+            params=params,
+            timeout=10
+        )
         
         if response.status_code == 200:
-            walkers = response.json().get('data', [])
+            result = response.json()
+            walkers = result.get('data', [])
             
-            # Format for frontend
             walkers_formatted = [{
                 'id': walker.get('id'),
                 'name': walker.get('name'),
-                'rating': walker.get('rating', 4.5),
+                'rating': walker.get('rating', 0.0),
                 'reviews': walker.get('total_reviews', 0),
-                'price': 25  # Default price
-            } for walker in walkers[:5]]  # Limit to 5 for demo
+                'location': walker.get('location', 'Unknown'),
+                'bio': walker.get('bio', ''),
+                'price': 25,
+                'availability': 'Available'
+            } for walker in walkers]
             
             return jsonify({
-                'walkers': walkers_formatted
+                'success': True,
+                'walkers': walkers_formatted,
+                'total': result.get('total', len(walkers))
             })
         else:
-            return jsonify({'walkers': []})
+            return jsonify({
+                'success': False,
+                'walkers': []
+            })
             
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Get walkers error: {str(e)}")
-        return jsonify({'walkers': []})
-
-@app.route('/api/bookings', methods=['GET', 'POST'])
-def bookings():
-    """Handle booking management - placeholder"""
-    if request.method == 'POST':
-        data = request.json
-        logger.info(f"Creating booking for walker: {data.get('walkerId')}")
-        
         return jsonify({
-            'status': 'success',
-            'message': 'Booking created (demo mode)'
-        })
-    else:
-        # Return sample bookings
-        return jsonify({
-            'upcoming': [],
-            'past': []
+            'success': False,
+            'walkers': [],
+            'error': str(e)
         })
 
-# Review routes (placeholder)
-@app.route('/api/reviews', methods=['GET', 'POST'])
-def reviews():
-    """Handle review management - placeholder"""
-    if request.method == 'POST':
-        data = request.json
-        logger.info(f"Creating review - Rating: {data.get('rating')}")
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Review submitted (demo mode)'
-        })
-    else:
-        return jsonify({
-            'reviews': []
-        })
+# ==================== VM SERVICE INFO ====================
 
-# Composite Service Demo Routes
-@app.route('/api/demo/composite-stats')
-def demo_composite_stats():
-    """Demonstrate composite service aggregation"""
-    try:
-        response = requests.get(f'{COMPOSITE_SERVICE_URL}/api/composite/stats')
-        if response.status_code == 200:
-            return jsonify(response.json())
-        else:
-            return jsonify({'error': 'Failed to get stats'}), response.status_code
-    except Exception as e:
-        logger.error(f"Stats error: {str(e)}")
-        return jsonify({'error': 'Composite service unavailable'}), 503
+@app.route('/api/service-info', methods=['GET'])
+def service_info():
+    """Get VM Service information and status"""
+    return jsonify({
+        'user_service': {
+            'url': USER_SERVICE_URL,
+            'swagger_ui': f'{USER_SERVICE_URL}/api-docs',
+            'swagger_json': f'{USER_SERVICE_URL}/api-docs/swagger.json',
+            'deployment': 'GCP Compute Engine VM',
+            'database': 'MariaDB (local on VM)',
+            'port': 3001
+        },
+        'composite_service': {
+            'url': COMPOSITE_SERVICE_URL,
+            'deployment': 'Local (for development)',
+            'port': 3002
+        }
+    })
 
-@app.route('/api/demo/user-complete/<int:user_id>')
-def demo_user_complete(user_id):
-    """Demonstrate parallel execution in composite service"""
-    try:
-        response = requests.get(f'{COMPOSITE_SERVICE_URL}/api/composite/users/{user_id}/complete')
-        if response.status_code == 200:
-            return jsonify(response.json())
-        else:
-            return jsonify({'error': 'Failed to get user data'}), response.status_code
-    except Exception as e:
-        logger.error(f"User complete error: {str(e)}")
-        return jsonify({'error': 'Composite service unavailable'}), 503
-
-@app.route('/api/demo/cascade-delete/<int:user_id>', methods=['DELETE'])
-def demo_cascade_delete(user_id):
-    """Demonstrate cascade delete in composite service"""
-    try:
-        response = requests.delete(f'{COMPOSITE_SERVICE_URL}/api/composite/users/{user_id}')
-        if response.status_code == 200:
-            return jsonify(response.json())
-        else:
-            return jsonify({'error': 'Failed to delete user'}), response.status_code
-    except Exception as e:
-        logger.error(f"Cascade delete error: {str(e)}")
-        return jsonify({'error': 'Composite service unavailable'}), 503
+# ==================== ERROR HANDLERS ====================
 
 @app.errorhandler(404)
 def not_found(error):
-    """Handle 404 errors"""
     return jsonify({'error': 'Not found'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    """Handle 500 errors"""
     logger.error(f"Internal error: {error}")
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting PawPal Web App on port {port}")
-    logger.info(f"User Service URL: {USER_SERVICE_URL}")
-    logger.info(f"Composite Service URL: {COMPOSITE_SERVICE_URL}")
+    
+    print("\n" + "="*60)
+    print("🚀 PawPal Web App - PRODUCTION MODE")
+    print("="*60)
+    print(f"📍 Web App Port: {port}")
+    print(f"📍 User Service: {USER_SERVICE_URL} (GCP VM)")
+    print(f"📍 Swagger UI: {USER_SERVICE_URL}/api-docs")
+    print(f"📍 Composite Service: {COMPOSITE_SERVICE_URL} (Local)")
+    print("="*60)
+    print("")
+    print("✅ Features:")
+    print("   - User registration and login")
+    print("   - Pet management")
+    print("   - Walker search")
+    print("   - Statistics")
+    print("="*60 + "\n")
     
     app.run(
         host='0.0.0.0',

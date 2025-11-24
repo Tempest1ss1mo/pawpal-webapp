@@ -11,6 +11,93 @@ let selectedWalkerId = null;
 // API Base URL (will be set based on environment)
 const API_BASE_URL = window.location.origin + '/api';
 
+// Check login status on page load
+window.addEventListener('DOMContentLoaded', () => {
+    checkLoginStatus();
+});
+
+// Check if user is logged in
+async function checkLoginStatus() {
+    try {
+        const response = await fetch('/api/current-user');
+        const data = await response.json();
+        
+        if (data.success) {
+            currentUser = data.user;
+            updateUIForLoggedInUser();
+        } else {
+            updateUIForGuestUser();
+        }
+    } catch (error) {
+        console.error('Error checking login status:', error);
+        updateUIForGuestUser();
+    }
+}
+
+// Update UI for logged in user
+function updateUIForLoggedInUser() {
+    // Hide guest-only elements (login/signup buttons)
+    document.querySelectorAll('.nav-guest-only').forEach(el => {
+        el.style.display = 'none';
+    });
+    
+    // Show auth-required elements
+    document.querySelectorAll('.nav-auth-required').forEach(el => {
+        el.style.display = 'flex';
+    });
+    
+    // Update user name in navigation
+    const navUserName = document.getElementById('navUserName');
+    if (navUserName && currentUser) {
+        navUserName.textContent = `Welcome, ${currentUser.name}`;
+    }
+    
+    // Show home page if on login/signup page
+    const activePage = document.querySelector('.page.active');
+    if (activePage && (activePage.id === 'login' || activePage.id === 'signup')) {
+        showPage('home');
+    }
+}
+
+// Update UI for guest user
+function updateUIForGuestUser() {
+    // Show guest-only elements
+    document.querySelectorAll('.nav-guest-only').forEach(el => {
+        el.style.display = 'inline-block';
+    });
+    
+    // Hide auth-required elements
+    document.querySelectorAll('.nav-auth-required').forEach(el => {
+        el.style.display = 'none';
+    });
+    
+    currentUser = null;
+}
+
+// Logout function
+async function logout() {
+    try {
+        const response = await fetch('/api/logout', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            currentUser = null;
+            updateUIForGuestUser();
+            showPage('home');
+            alert('You have been logged out successfully.');
+        }
+    } catch (error) {
+        console.error('Logout error:', error);
+        alert('Error logging out. Please try again.');
+    }
+}
+
 // Page Navigation
 function showPage(pageId) {
     const pages = document.querySelectorAll('.page');
@@ -130,17 +217,36 @@ async function apiCall(endpoint, method = 'GET', data = null) {
 document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     
-    const email = document.getElementById('loginEmail').value;
-    const password = document.getElementById('loginPassword').value;
+    const name = document.getElementById('loginName').value.trim();
+    const email = document.getElementById('loginEmail').value.trim().toLowerCase();
     
     try {
-        const result = await apiCall('/login', 'POST', { email, password });
-        console.log('Login successful:', result);
-        currentUser = result.user;
-        alert('Login successful!');
-        showPage('profile');
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+                name: name,
+                email: email,
+                password: 'demo' // Dummy password for compatibility
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.status === 200 && result.success) {
+            console.log('Login successful:', result);
+            currentUser = result.user;
+            updateUIForLoggedInUser();
+            alert('✅ Welcome back, ' + currentUser.name + '!');
+            showPage('home');
+        } else {
+            alert('❌ Login failed!\n\n' + (result.message || 'Please check your name and email.'));
+        }
     } catch (error) {
-        alert('Login failed: ' + error.message);
+        console.error('Login error:', error);
+        alert('❌ Login failed!\n\nNetwork error: ' + error.message);
     }
 });
 
@@ -148,21 +254,68 @@ document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
 document.getElementById('signupForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     
+    // All fields are required now
     const data = {
-        accountType: selectedAccountType,
-        name: document.getElementById('signupName').value,
-        email: document.getElementById('signupEmail').value,
-        password: document.getElementById('signupPassword').value,
-        location: document.getElementById('signupLocation').value
+        name: document.getElementById('signupName').value.trim(),
+        email: document.getElementById('signupEmail').value.trim().toLowerCase(),
+        accountType: selectedAccountType || 'owner',
+        phone: document.getElementById('signupPhone').value.trim(),
+        location: document.getElementById('signupLocation').value.trim(),
+        profile_image_url: document.getElementById('signupProfileImage').value.trim(),
+        bio: document.getElementById('signupBio').value.trim()
     };
     
+    // Validate all required fields
+    if (!data.name || !data.email || !data.phone || !data.location || !data.profile_image_url || !data.bio) {
+        alert('All fields are required. Please fill in all information.');
+        return;
+    }
+    
+    // Validate phone format
+    const phoneRegex = /^\+?[1-9]\d{0,15}$/;
+    if (!phoneRegex.test(data.phone)) {
+        alert('Invalid phone format!\n\n' +
+              '✅ Valid formats:\n' +
+              '  • 15551234567 (digits only)\n' +
+              '  • +8613812345678 (with country code)\n\n' +
+              '❌ Invalid formats:\n' +
+              '  • 555-0100 (no dashes)\n' +
+              '  • (555) 123-4567 (no parentheses or spaces)');
+        return;
+    }
+    
     try {
-        const result = await apiCall('/signup', 'POST', data);
-        console.log('Signup successful:', result);
-        alert('Account created successfully!');
-        showPage('login');
+        const response = await fetch('/api/signup', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data)
+        });
+        
+        const result = await response.json();
+        
+        // Check response status code
+        if (response.status === 201 || response.status === 200) {
+            // Success
+            console.log('Signup successful:', result);
+            alert('✅ Account created successfully!\n\nYou can now login with:\n' +
+                  'Name: ' + data.name + '\n' +
+                  'Email: ' + data.email);
+            showPage('login');
+        } else if (response.status === 409) {
+            // Email already exists
+            alert('❌ Registration failed!\n\nEmail already exists. Please use a different email or login.');
+        } else if (response.status === 400) {
+            // Validation error
+            alert('❌ Registration failed!\n\n' + (result.message || 'Invalid input data. Please check all fields.'));
+        } else {
+            // Other errors
+            alert('❌ Registration failed!\n\n' + (result.message || 'Server error. Please try again.'));
+        }
     } catch (error) {
-        alert('Signup failed: ' + error.message);
+        console.error('Signup error:', error);
+        alert('❌ Registration failed!\n\nNetwork error: ' + error.message);
     }
 });
 
